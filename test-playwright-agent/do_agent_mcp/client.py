@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from mcp import ClientSession
-from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
 
 from .schema_converter import mcp_to_openai
@@ -105,18 +104,18 @@ class McpToolSet:
                     name, server.url, exc_info=True,
                 )
 
-    async def _connect_server(self, name: str, server: ServerConfig, retries: int = 1) -> None:
-        """Connect to a single MCP server. Retries=1 by default (SSE servers crash on reconnect)."""
+    async def _connect_server(self, name: str, server: ServerConfig, retries: int = 3) -> None:
+        """Connect to a single MCP server with exponential backoff.
+
+        Default 3 attempts to handle slow-starting servers (e.g. Playwright ~5s startup).
+        """
         last_error = None
         for attempt in range(retries):
             try:
                 headers = server.auth_headers
 
-                # Use SSE client for /sse endpoints, streamable HTTP otherwise
-                if server.url.rstrip("/").endswith("/sse"):
-                    cm = sse_client(url=server.url, headers=headers)
-                else:
-                    cm = streamablehttp_client(url=server.url, headers=headers)
+                # MCP transport is streamable HTTP on the /mcp endpoint.
+                cm = streamablehttp_client(url=server.url, headers=headers)
 
                 # Enter context via exit stack — keeps task scope consistent
                 read_stream, write_stream, _ = await self._exit_stack.enter_async_context(cm)
