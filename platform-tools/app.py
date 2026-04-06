@@ -1,4 +1,4 @@
-"""Platform Tools Agent — discovers and uses MCP tools at startup.
+"""Web Research Agent — discovers and uses MCP tools at startup.
 
 Tools run externally (fetch as function, playwright as container).
 The agent waits for required MCP dependencies before serving traffic.
@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
-logger = logging.getLogger("platform-tools-agent")
+logger = logging.getLogger("web-research-agent")
 
 GRADIENT_API_KEY = os.environ.get("GRADIENT_API_KEY", "")
 LLM_ENDPOINT = os.environ.get("LLM_ENDPOINT", "https://inference.do-ai.run/v1")
@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
             await _toolset.close()
 
 
-app = FastAPI(title="Platform Tools Agent", lifespan=lifespan)
+app = FastAPI(title="Web Research Agent", lifespan=lifespan)
 
 
 def _prepare_messages(messages: list[dict]) -> list[dict]:

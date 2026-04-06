@@ -61,7 +61,7 @@ This is a repo-specific extension, not part of the OpenAI API.
 
 These are the best starting points for new agents:
 
-- `platform-tools/`
+- `platform-tools/` (Web Research Agent)
   - Generic MCP-backed single-agent template.
   - Good fit for external fetch tools, browser tools, and research-style workflows.
   - Best example of env-driven tool discovery.
@@ -94,10 +94,12 @@ These are validation-focused rather than general-purpose products:
 
 - `test-playwright-agent/`
   - Browser-focused smoke-test agent for Playwright MCP deployments.
+  - The `test-` prefix is intentional so nobody mistakes it for a generic production template.
   - Best for validating MCP connectivity and browser execution.
 
 - `test-cdp-agent/`
   - Browser-focused smoke-test agent for Chrome DevTools MCP deployments.
+  - The `test-` prefix is intentional so nobody mistakes it for a generic production template.
   - Best for validating CDP-oriented browser setups.
 
 ## MCP server inventory
