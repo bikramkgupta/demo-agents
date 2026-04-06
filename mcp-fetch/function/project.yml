@@ -1,0 +1,12 @@
+packages:
+  - name: mcp
+    functions:
+      - name: fetch
+        runtime: python:3.13
+        web: true
+        limits:
+          timeout: 30000
+          memory: 256
+        environment:
+          USER_AGENT: "MCP-Fetch/1.0 (DO Functions)"
+          MAX_LENGTH: "5000"
