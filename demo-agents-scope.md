@@ -23,12 +23,14 @@ Current compatibility targets:
 - Request `messages` are preserved instead of being collapsed to only the latest user turn.
 - Request `stream=true` returns SSE from App Platform services.
 - Non-streaming requests return OpenAI-style JSON chat completions.
+- Control-plane-style model aliases such as `openai/openai-gpt-4o` are normalized into the Gradient-compatible bare model ids used by these demos.
 
 Current intentional limitations:
 
 - Streaming is compatibility-oriented, not token-perfect parity with OpenAI. Tool execution is still completed inside the agent before the final content stream is emitted.
 - `usage`, `system_fingerprint`, and advanced response metadata are not populated.
 - The repo supports `chat.completions` style requests only. It does not implement the Responses API.
+- Demo agents remain Gradient-first for inference. Unsupported model ids fall back to the configured `LLM_MODEL` instead of attempting direct BYO-provider routing.
 
 ## Tool state model
 
@@ -113,6 +115,7 @@ They are intended to be composed into agents through `MCP_SERVERS` rather than c
 When adding a new agent to this repo, prefer the following:
 
 - Preserve caller-provided `messages` and `model`.
+- While the repo is Gradient-first, normalize caller model aliases into supported Gradient model ids and fall back to the configured default for unsupported models.
 - Implement SSE on App Platform endpoints when `stream=true`.
 - Keep system prompts narrow and task-specific.
 - Make demo limitations explicit in tool responses.

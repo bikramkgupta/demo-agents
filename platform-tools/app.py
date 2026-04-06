@@ -22,6 +22,7 @@ logger = logging.getLogger("platform-tools-agent")
 GRADIENT_API_KEY = os.environ.get("GRADIENT_API_KEY", "")
 LLM_ENDPOINT = os.environ.get("LLM_ENDPOINT", "https://inference.do-ai.run/v1")
 MODEL = os.environ.get("LLM_MODEL", "openai-gpt-4o")
+SUPPORTED_GRADIENT_MODELS = {"openai-gpt-4o", "openai-gpt-5.4"}
 
 _tools = []
 _toolset = None
@@ -57,6 +58,18 @@ def _prepare_messages(messages: list[dict]) -> list[dict]:
     if not any(message.get("role") == "system" for message in prepared):
         prepared.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
     return prepared
+
+
+def _resolve_model(requested_model: str | None) -> str:
+    model = (requested_model or MODEL).strip()
+    if model.startswith("openai/"):
+        model = model.split("/", 1)[1]
+    if model in {"gpt-4o", "gpt-5.4"}:
+        model = f"openai-{model}"
+    if model in SUPPORTED_GRADIENT_MODELS:
+        return model
+    logger.warning("Unsupported requested model %r; falling back to %s", requested_model, MODEL)
+    return MODEL
 
 
 def _iter_text_chunks(text: str, size: int = 120):
@@ -150,7 +163,7 @@ class ChatRequest(BaseModel):
 
 @app.post("/v1/chat/completions")
 async def chat(request: ChatRequest):
-    effective_model = request.model or MODEL
+    effective_model = _resolve_model(request.model)
     conversation_id = request.conversation_id or str(uuid.uuid4())
     response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
     created = int(time.time())
