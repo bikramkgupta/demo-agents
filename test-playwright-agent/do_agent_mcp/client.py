@@ -244,8 +244,13 @@ class McpToolSet:
             if key in self._conversation_sessions:
                 meta["session_id"] = self._conversation_sessions[key]
 
-        # Call the tool
-        result = await session.call_tool(original_name, arguments=arguments)
+        # Call the tool. Stateful MCP servers expect session affinity metadata
+        # to be passed back on subsequent requests.
+        result = await session.call_tool(
+            original_name,
+            arguments=arguments,
+            meta=meta or None,
+        )
 
         # Track session ID from response (if stateful)
         if server.stateful and conversation_id and hasattr(result, "meta"):
@@ -283,3 +288,4 @@ class McpToolSet:
             self._exit_stack = None
         self._sessions.clear()
         self._openai_tools.clear()
+        self._conversation_sessions.clear()
