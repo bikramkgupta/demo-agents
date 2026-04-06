@@ -104,35 +104,42 @@ class McpToolSet:
                     name, server.url, exc_info=True,
                 )
 
-    async def _connect_server(self, name: str, server: ServerConfig, retries: int = 3) -> None:
+    async def _connect_server(self, name: str, server: ServerConfig, retries: int = 5) -> None:
         """Connect to a single MCP server with exponential backoff.
 
-        Default 3 attempts to handle slow-starting servers (e.g. Playwright ~5s startup).
+        Default 5 attempts to handle slow-starting container MCP servers on App Platform.
         """
         last_error = None
+        attempt_timeout = float(os.environ.get("MCP_CONNECT_TIMEOUT", "5"))
         for attempt in range(retries):
             try:
                 headers = server.auth_headers
 
-                # MCP transport is streamable HTTP on the /mcp endpoint.
-                cm = streamablehttp_client(url=server.url, headers=headers)
+                async with asyncio.timeout(attempt_timeout):
+                    # MCP transport is streamable HTTP on the /mcp endpoint.
+                    cm = streamablehttp_client(
+                        url=server.url,
+                        headers=headers,
+                        timeout=attempt_timeout,
+                        sse_read_timeout=attempt_timeout,
+                    )
 
-                # Enter context via exit stack — keeps task scope consistent
-                read_stream, write_stream, _ = await self._exit_stack.enter_async_context(cm)
+                    # Enter context via exit stack — keeps task scope consistent
+                    read_stream, write_stream, _ = await self._exit_stack.enter_async_context(cm)
 
-                session = ClientSession(read_stream, write_stream)
-                await self._exit_stack.enter_async_context(session)
-                await session.initialize()
+                    session = ClientSession(read_stream, write_stream)
+                    await self._exit_stack.enter_async_context(session)
+                    await session.initialize()
 
-                self._sessions[name] = session
+                    self._sessions[name] = session
 
-                # Discover tools
-                tools_result = await session.list_tools()
-                openai_tools = mcp_to_openai(tools_result.tools, name)
-                self._openai_tools.extend(openai_tools)
+                    # Discover tools
+                    tools_result = await session.list_tools()
+                    openai_tools = mcp_to_openai(tools_result.tools, name)
+                    self._openai_tools.extend(openai_tools)
 
-                logger.info("Discovered %d tools from '%s'", len(openai_tools), name)
-                return
+                    logger.info("Discovered %d tools from '%s'", len(openai_tools), name)
+                    return
 
             except Exception as e:
                 last_error = e
