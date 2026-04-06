@@ -17,6 +17,7 @@ import os
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -104,6 +105,21 @@ class McpToolSet:
                     name, server.url, exc_info=True,
                 )
 
+    async def _wait_for_container_server(self, server: ServerConfig, timeout: float) -> None:
+        """Wait for an internal container MCP server to accept TCP connections."""
+        parsed = urlparse(server.url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host:
+            raise ValueError(f"Invalid MCP server URL: {server.url}")
+
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=timeout,
+        )
+        writer.close()
+        await writer.wait_closed()
+
     async def _connect_server(self, name: str, server: ServerConfig, retries: int = 5) -> None:
         """Connect to a single MCP server with exponential backoff.
 
@@ -115,31 +131,32 @@ class McpToolSet:
             try:
                 headers = server.auth_headers
 
-                async with asyncio.timeout(attempt_timeout):
-                    # MCP transport is streamable HTTP on the /mcp endpoint.
-                    cm = streamablehttp_client(
-                        url=server.url,
-                        headers=headers,
-                        timeout=attempt_timeout,
-                        sse_read_timeout=attempt_timeout,
-                    )
+                if server.execution == "container":
+                    await self._wait_for_container_server(server, attempt_timeout)
 
-                    # Enter context via exit stack — keeps task scope consistent
-                    read_stream, write_stream, _ = await self._exit_stack.enter_async_context(cm)
+                # MCP transport is streamable HTTP on the /mcp endpoint.
+                cm = streamablehttp_client(
+                    url=server.url,
+                    headers=headers,
+                    timeout=attempt_timeout,
+                )
 
-                    session = ClientSession(read_stream, write_stream)
-                    await self._exit_stack.enter_async_context(session)
-                    await session.initialize()
+                # Enter context via exit stack — keeps task scope consistent
+                read_stream, write_stream, _ = await self._exit_stack.enter_async_context(cm)
 
-                    self._sessions[name] = session
+                session = ClientSession(read_stream, write_stream)
+                await self._exit_stack.enter_async_context(session)
+                await session.initialize()
 
-                    # Discover tools
-                    tools_result = await session.list_tools()
-                    openai_tools = mcp_to_openai(tools_result.tools, name)
-                    self._openai_tools.extend(openai_tools)
+                self._sessions[name] = session
 
-                    logger.info("Discovered %d tools from '%s'", len(openai_tools), name)
-                    return
+                # Discover tools
+                tools_result = await session.list_tools()
+                openai_tools = mcp_to_openai(tools_result.tools, name)
+                self._openai_tools.extend(openai_tools)
+
+                logger.info("Discovered %d tools from '%s'", len(openai_tools), name)
+                return
 
             except Exception as e:
                 last_error = e
