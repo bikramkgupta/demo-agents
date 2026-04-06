@@ -1,10 +1,9 @@
 """Platform Tools Agent — discovers and uses MCP tools at startup.
 
 Tools run externally (fetch as function, playwright as container).
-The agent discovers them via do_agent_mcp and passes them to the LLM.
+The agent waits for required MCP dependencies before serving traffic.
 """
 
-import asyncio
 import json
 import logging
 import os
@@ -24,31 +23,25 @@ _tools = []
 _toolset = None
 
 
-async def _discover_in_background():
-    """Discover MCP tools in a background task after server starts."""
+async def _discover_tools():
+    """Discover required MCP tools before serving traffic."""
     global _tools, _toolset
-    startup_delay = int(os.environ.get("MCP_STARTUP_DELAY", "10"))
-    logger.info("Waiting %ds for MCP servers to start...", startup_delay)
-    await asyncio.sleep(startup_delay)
-    logger.info("Discovering MCP tools...")
-    try:
-        from do_agent_mcp import discover_tools
-        _tools, _toolset = await discover_tools()
-        tool_names = [t["function"]["name"] for t in _tools]
-        logger.info("Discovered %d tools: %s", len(_tools), tool_names)
-    except Exception as e:
-        logger.warning("MCP tool discovery failed (tools will be empty): %s", e)
+    logger.info("Discovering required MCP tools before serving traffic...")
+    from do_agent_mcp import discover_tools
+
+    _tools, _toolset = await discover_tools()
+    tool_names = [t["function"]["name"] for t in _tools]
+    logger.info("Discovered %d tools: %s", len(_tools), tool_names)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Run discovery as a background task so MCP context managers
-    # stay in the same async task throughout their lifetime
-    task = asyncio.create_task(_discover_in_background())
-    yield
-    task.cancel()
-    if _toolset:
-        await _toolset.close()
+    await _discover_tools()
+    try:
+        yield
+    finally:
+        if _toolset:
+            await _toolset.close()
 
 
 app = FastAPI(title="Platform Tools Agent", lifespan=lifespan)

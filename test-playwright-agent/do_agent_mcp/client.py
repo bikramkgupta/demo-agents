@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
@@ -35,6 +36,7 @@ class ServerConfig:
     url: str
     execution: str = "container"  # "function" | "container" | "external"
     stateful: bool = False
+    required: bool = True
     session_config: dict = field(default_factory=dict)
     auth: dict | None = None  # {"type": "bearer", "token": "..."}
 
@@ -85,25 +87,49 @@ class McpToolSet:
                 url=c["url"],
                 execution=c.get("execution", "container"),
                 stateful=c.get("stateful", False),
+                required=c.get("required", True),
                 session_config=c.get("session_config", {}),
                 auth=c.get("auth"),
             ))
         return cls(servers)
 
     async def connect(self) -> None:
-        """Connect to all configured MCP servers. Skips unavailable ones."""
+        """Connect to all configured MCP servers.
+
+        Required servers fail startup if unavailable. Optional servers are logged and skipped.
+        """
         self._exit_stack = AsyncExitStack()
         await self._exit_stack.__aenter__()
 
+        required_failures: dict[str, str] = {}
         for name, server in self._servers.items():
             try:
                 await self._connect_server(name, server)
                 logger.info("Connected to MCP server '%s' at %s", name, server.url)
-            except Exception:
-                logger.warning(
-                    "Failed to connect to MCP server '%s' at %s — skipping",
-                    name, server.url, exc_info=True,
-                )
+            except Exception as exc:
+                if server.required:
+                    logger.error(
+                        "Required MCP server '%s' at %s is unavailable during startup",
+                        name,
+                        server.url,
+                        exc_info=True,
+                    )
+                    required_failures[name] = f"{type(exc).__name__}: {exc}"
+                else:
+                    logger.warning(
+                        "Failed to connect to optional MCP server '%s' at %s — skipping",
+                        name,
+                        server.url,
+                        exc_info=True,
+                    )
+
+        if required_failures:
+            details = "; ".join(
+                f"{name} ({self._servers[name].url}): {error}"
+                for name, error in required_failures.items()
+            )
+            await self.close()
+            raise RuntimeError(f"Required MCP servers unavailable at startup: {details}")
 
     async def _wait_for_container_server(self, server: ServerConfig, timeout: float) -> None:
         """Wait for an internal container MCP server to accept TCP connections."""
@@ -120,14 +146,16 @@ class McpToolSet:
         writer.close()
         await writer.wait_closed()
 
-    async def _connect_server(self, name: str, server: ServerConfig, retries: int = 5) -> None:
-        """Connect to a single MCP server with exponential backoff.
-
-        Default 5 attempts to handle slow-starting container MCP servers on App Platform.
-        """
+    async def _connect_server(self, name: str, server: ServerConfig) -> None:
+        """Connect to a single MCP server within the configured startup deadline."""
         last_error = None
         attempt_timeout = float(os.environ.get("MCP_CONNECT_TIMEOUT", "5"))
-        for attempt in range(retries):
+        startup_deadline = float(os.environ.get("MCP_CONNECT_DEADLINE_SECONDS", "45"))
+        max_backoff = float(os.environ.get("MCP_CONNECT_MAX_BACKOFF_SECONDS", "10"))
+        deadline = time.monotonic() + startup_deadline
+        attempt = 0
+
+        while True:
             try:
                 headers = server.auth_headers
 
@@ -160,10 +188,19 @@ class McpToolSet:
 
             except Exception as e:
                 last_error = e
-                if attempt < retries - 1:
-                    wait = 2 ** attempt
-                    logger.debug("Retry %d for '%s' in %ds", attempt + 1, name, wait)
-                    await asyncio.sleep(wait)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                wait = min(2 ** attempt, max_backoff, remaining)
+                logger.debug(
+                    "Retry %d for '%s' in %.1fs (%.1fs remaining)",
+                    attempt + 1,
+                    name,
+                    wait,
+                    remaining,
+                )
+                attempt += 1
+                await asyncio.sleep(wait)
 
         raise last_error  # type: ignore[misc]
 

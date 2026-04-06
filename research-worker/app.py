@@ -26,15 +26,16 @@ _toolset = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _tools, _toolset
+    logger.info("Discovering required MCP tools before serving traffic...")
+    from do_agent_mcp import discover_tools
+
+    _tools, _toolset = await discover_tools()
+    logger.info("Discovered %d tools", len(_tools))
     try:
-        from do_agent_mcp import discover_tools
-        _tools, _toolset = await discover_tools()
-        logger.info("Discovered %d tools", len(_tools))
-    except Exception as e:
-        logger.warning("MCP discovery failed: %s", e)
-    yield
-    if _toolset:
-        await _toolset.close()
+        yield
+    finally:
+        if _toolset:
+            await _toolset.close()
 
 
 app = FastAPI(title="Research Agent", lifespan=lifespan)
