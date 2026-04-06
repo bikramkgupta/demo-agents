@@ -4,12 +4,16 @@ Tools run in-process. No MCP, no Plano, no external services.
 Just a FastAPI agent with inline tools that the LLM can call.
 """
 
+import asyncio
 import json
 import logging
 import os
+import time
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s — %(message)s")
@@ -80,6 +84,8 @@ WEATHER_DATA = {
     "san francisco": {"temp": 16, "condition": "Foggy", "humidity": 75},
 }
 
+SYSTEM_PROMPT = "You are a helpful assistant. Use the available tools to answer questions accurately."
+
 
 def call_tool(name: str, args: dict) -> str:
     logger.info("Tool call: %s(%s)", name, json.dumps(args))
@@ -112,20 +118,60 @@ def call_tool(name: str, args: dict) -> str:
 
 # --- LLM tool-calling loop ---
 
-async def run_agent(query: str) -> str:
-    import httpx
+def _prepare_messages(messages: list[dict]) -> list[dict]:
+    prepared = list(messages or [])
+    if not any(message.get("role") == "system" for message in prepared):
+        prepared.insert(0, {"role": "system", "content": SYSTEM_PROMPT})
+    return prepared
 
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant. Use the available tools to answer questions accurately."},
-        {"role": "user", "content": query},
-    ]
+
+def _iter_text_chunks(text: str, size: int = 120):
+    for idx in range(0, len(text), size):
+        yield text[idx:idx + size]
+
+
+def _chunk_payload(response_id: str, model: str, created: int, delta: dict, finish_reason):
+    return json.dumps({
+        "id": response_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    })
+
+
+async def _stream_response(task: asyncio.Task[str], response_id: str, model: str):
+    created = int(time.time())
+    yield f"data: {_chunk_payload(response_id, model, created, {'role': 'assistant'}, None)}\n\n"
+
+    while not task.done():
+        yield ": keep-alive\n\n"
+        await asyncio.sleep(5)
+
+    try:
+        response = await task
+    except Exception as exc:
+        logger.exception("Streaming request failed")
+        response = f"Internal error: {exc}"
+
+    for chunk in _iter_text_chunks(response):
+        yield f"data: {_chunk_payload(response_id, model, created, {'content': chunk}, None)}\n\n"
+        await asyncio.sleep(0)
+
+    yield f"data: {_chunk_payload(response_id, model, created, {}, 'stop')}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+async def run_agent(messages: list[dict], model: str) -> str:
+    import httpx
+    messages = _prepare_messages(messages)
 
     async with httpx.AsyncClient(timeout=60) as client:
         for _ in range(5):  # Max 5 tool-calling rounds
             resp = await client.post(
                 f"{LLM_ENDPOINT}/chat/completions",
                 headers={"Authorization": f"Bearer {GRADIENT_API_KEY}"},
-                json={"model": MODEL, "messages": messages, "tools": TOOLS},
+                json={"model": model, "messages": messages, "tools": TOOLS},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -152,27 +198,37 @@ async def run_agent(query: str) -> str:
 # --- HTTP endpoints ---
 
 class ChatRequest(BaseModel):
-    model: str = MODEL
+    model: str | None = None
     messages: list[dict] = []
     stream: bool = False
 
 
 @app.post("/v1/chat/completions")
 async def chat(request: ChatRequest):
-    query = ""
-    for m in reversed(request.messages):
-        if m.get("role") == "user":
-            query = m.get("content", "")
-            break
+    effective_model = request.model or MODEL
+    response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    created = int(time.time())
 
-    logger.info("Query: %s", query[:100])
-    response = await run_agent(query)
+    if request.stream:
+        task = asyncio.create_task(run_agent(request.messages, effective_model))
+        return StreamingResponse(
+            _stream_response(task, response_id, effective_model),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    response = await run_agent(request.messages, effective_model)
     logger.info("Response: %s", response[:100])
 
     return {
-        "id": "chatcmpl-hello",
+        "id": response_id,
         "object": "chat.completion",
-        "model": MODEL,
+        "created": created,
+        "model": effective_model,
         "choices": [{"index": 0, "message": {"role": "assistant", "content": response}, "finish_reason": "stop"}],
     }
 
