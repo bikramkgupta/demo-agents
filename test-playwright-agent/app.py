@@ -1,9 +1,8 @@
 """Minimal test agent for Playwright MCP server on App Platform.
 
-Discovers tools at startup, exposes /health with tool list.
-Accepts queries and executes tool calls via MCP.
+Discovers required tools at startup, exposes /health with tool list,
+and only serves traffic after MCP dependencies are ready.
 """
-import asyncio
 import json
 import logging
 import os
@@ -24,27 +23,24 @@ _tools = []
 _toolset = None
 
 
-async def _discover_background():
+async def _discover_tools():
     global _tools, _toolset
-    delay = int(os.environ.get("MCP_STARTUP_DELAY", "15"))
-    logger.info("Waiting %ds for MCP servers...", delay)
-    await asyncio.sleep(delay)
-    try:
-        from do_agent_mcp import discover_tools
-        _tools, _toolset = await discover_tools()
-        names = [t["function"]["name"] for t in _tools]
-        logger.info("Discovered %d tools: %s", len(names), names)
-    except Exception as e:
-        logger.error("Discovery failed: %s", e)
+    logger.info("Discovering required MCP tools before serving traffic...")
+    from do_agent_mcp import discover_tools
+
+    _tools, _toolset = await discover_tools()
+    names = [t["function"]["name"] for t in _tools]
+    logger.info("Discovered %d tools: %s", len(names), names)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(_discover_background())
-    yield
-    task.cancel()
-    if _toolset:
-        await _toolset.close()
+    await _discover_tools()
+    try:
+        yield
+    finally:
+        if _toolset:
+            await _toolset.close()
 
 
 app = FastAPI(title="Test Playwright Agent", lifespan=lifespan)

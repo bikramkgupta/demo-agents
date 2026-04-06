@@ -14,12 +14,13 @@ import asyncio
 import json
 import logging
 import os
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 from mcp import ClientSession
-from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
 
 from .schema_converter import mcp_to_openai
@@ -35,6 +36,7 @@ class ServerConfig:
     url: str
     execution: str = "container"  # "function" | "container" | "external"
     stateful: bool = False
+    required: bool = True
     session_config: dict = field(default_factory=dict)
     auth: dict | None = None  # {"type": "bearer", "token": "..."}
 
@@ -85,38 +87,87 @@ class McpToolSet:
                 url=c["url"],
                 execution=c.get("execution", "container"),
                 stateful=c.get("stateful", False),
+                required=c.get("required", True),
                 session_config=c.get("session_config", {}),
                 auth=c.get("auth"),
             ))
         return cls(servers)
 
     async def connect(self) -> None:
-        """Connect to all configured MCP servers. Skips unavailable ones."""
+        """Connect to all configured MCP servers.
+
+        Required servers fail startup if unavailable. Optional servers are logged and skipped.
+        """
         self._exit_stack = AsyncExitStack()
         await self._exit_stack.__aenter__()
 
+        required_failures: dict[str, str] = {}
         for name, server in self._servers.items():
             try:
                 await self._connect_server(name, server)
                 logger.info("Connected to MCP server '%s' at %s", name, server.url)
-            except Exception:
-                logger.warning(
-                    "Failed to connect to MCP server '%s' at %s — skipping",
-                    name, server.url, exc_info=True,
-                )
+            except Exception as exc:
+                if server.required:
+                    logger.error(
+                        "Required MCP server '%s' at %s is unavailable during startup",
+                        name,
+                        server.url,
+                        exc_info=True,
+                    )
+                    required_failures[name] = f"{type(exc).__name__}: {exc}"
+                else:
+                    logger.warning(
+                        "Failed to connect to optional MCP server '%s' at %s — skipping",
+                        name,
+                        server.url,
+                        exc_info=True,
+                    )
 
-    async def _connect_server(self, name: str, server: ServerConfig, retries: int = 1) -> None:
-        """Connect to a single MCP server. Retries=1 by default (SSE servers crash on reconnect)."""
+        if required_failures:
+            details = "; ".join(
+                f"{name} ({self._servers[name].url}): {error}"
+                for name, error in required_failures.items()
+            )
+            await self.close()
+            raise RuntimeError(f"Required MCP servers unavailable at startup: {details}")
+
+    async def _wait_for_container_server(self, server: ServerConfig, timeout: float) -> None:
+        """Wait for an internal container MCP server to accept TCP connections."""
+        parsed = urlparse(server.url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host:
+            raise ValueError(f"Invalid MCP server URL: {server.url}")
+
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=timeout,
+        )
+        writer.close()
+        await writer.wait_closed()
+
+    async def _connect_server(self, name: str, server: ServerConfig) -> None:
+        """Connect to a single MCP server within the configured startup deadline."""
         last_error = None
-        for attempt in range(retries):
+        attempt_timeout = float(os.environ.get("MCP_CONNECT_TIMEOUT", "5"))
+        startup_deadline = float(os.environ.get("MCP_CONNECT_DEADLINE_SECONDS", "45"))
+        max_backoff = float(os.environ.get("MCP_CONNECT_MAX_BACKOFF_SECONDS", "10"))
+        deadline = time.monotonic() + startup_deadline
+        attempt = 0
+
+        while True:
             try:
                 headers = server.auth_headers
 
-                # Use SSE client for /sse endpoints, streamable HTTP otherwise
-                if server.url.rstrip("/").endswith("/sse"):
-                    cm = sse_client(url=server.url, headers=headers)
-                else:
-                    cm = streamablehttp_client(url=server.url, headers=headers)
+                if server.execution == "container":
+                    await self._wait_for_container_server(server, attempt_timeout)
+
+                # MCP transport is streamable HTTP on the /mcp endpoint.
+                cm = streamablehttp_client(
+                    url=server.url,
+                    headers=headers,
+                    timeout=attempt_timeout,
+                )
 
                 # Enter context via exit stack — keeps task scope consistent
                 read_stream, write_stream, _ = await self._exit_stack.enter_async_context(cm)
@@ -137,10 +188,19 @@ class McpToolSet:
 
             except Exception as e:
                 last_error = e
-                if attempt < retries - 1:
-                    wait = 2 ** attempt
-                    logger.debug("Retry %d for '%s' in %ds", attempt + 1, name, wait)
-                    await asyncio.sleep(wait)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                wait = min(2 ** attempt, max_backoff, remaining)
+                logger.debug(
+                    "Retry %d for '%s' in %.1fs (%.1fs remaining)",
+                    attempt + 1,
+                    name,
+                    wait,
+                    remaining,
+                )
+                attempt += 1
+                await asyncio.sleep(wait)
 
         raise last_error  # type: ignore[misc]
 
