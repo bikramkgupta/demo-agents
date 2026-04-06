@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import date, datetime, timedelta
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -22,12 +23,124 @@ app = FastAPI(title="Booking Agent")
 
 # --- Simulated booking database ---
 
+AIRPORT_ALIASES = {
+    "NYC": "NYC",
+    "NEW YORK": "NYC",
+    "NEW YORK CITY": "NYC",
+    "LON": "LON",
+    "LONDON": "LON",
+    "TYO": "TYO",
+    "TOKYO": "TYO",
+    "SFO": "SFO",
+    "SF": "SFO",
+    "SAN FRANCISCO": "SFO",
+    "SAN FRANCISCO INTERNATIONAL": "SFO",
+    "AMS": "AMS",
+    "AMSTERDAM": "AMS",
+    "AMSTERDAM SCHIPHOL": "AMS",
+}
+
 FLIGHTS = {
-    "NYC-TYO-001": {"airline": "Japan Airlines", "route": "NYC → Tokyo", "price": 1250, "duration": "14h 30m", "stops": 0},
-    "NYC-TYO-002": {"airline": "ANA", "route": "NYC → Tokyo", "price": 1180, "duration": "14h 45m", "stops": 0},
-    "NYC-TYO-003": {"airline": "United", "route": "NYC → Tokyo", "price": 980, "duration": "16h 20m", "stops": 1},
-    "NYC-LON-001": {"airline": "British Airways", "route": "NYC → London", "price": 650, "duration": "7h 15m", "stops": 0},
-    "NYC-LON-002": {"airline": "Delta", "route": "NYC → London", "price": 580, "duration": "7h 30m", "stops": 0},
+    "NYC-TYO-001": {
+        "origin": "NYC",
+        "destination": "TYO",
+        "departure_date": "2026-04-29",
+        "airline": "Japan Airlines",
+        "route": "NYC → Tokyo",
+        "price": 1250,
+        "duration": "14h 30m",
+        "stops": 0,
+    },
+    "NYC-TYO-002": {
+        "origin": "NYC",
+        "destination": "TYO",
+        "departure_date": "2026-04-30",
+        "airline": "ANA",
+        "route": "NYC → Tokyo",
+        "price": 1180,
+        "duration": "14h 45m",
+        "stops": 0,
+    },
+    "NYC-TYO-003": {
+        "origin": "NYC",
+        "destination": "TYO",
+        "departure_date": "2026-05-02",
+        "airline": "United",
+        "route": "NYC → Tokyo",
+        "price": 980,
+        "duration": "16h 20m",
+        "stops": 1,
+    },
+    "NYC-LON-001": {
+        "origin": "NYC",
+        "destination": "LON",
+        "departure_date": "2026-04-28",
+        "airline": "British Airways",
+        "route": "NYC → London",
+        "price": 650,
+        "duration": "7h 15m",
+        "stops": 0,
+    },
+    "NYC-LON-002": {
+        "origin": "NYC",
+        "destination": "LON",
+        "departure_date": "2026-05-01",
+        "airline": "Delta",
+        "route": "NYC → London",
+        "price": 580,
+        "duration": "7h 30m",
+        "stops": 0,
+    },
+    "SFO-AMS-001": {
+        "origin": "SFO",
+        "destination": "AMS",
+        "departure_date": "2026-04-27",
+        "airline": "KLM",
+        "route": "San Francisco → Amsterdam",
+        "price": 1020,
+        "duration": "10h 40m",
+        "stops": 0,
+    },
+    "SFO-AMS-002": {
+        "origin": "SFO",
+        "destination": "AMS",
+        "departure_date": "2026-04-29",
+        "airline": "United",
+        "route": "San Francisco → Amsterdam",
+        "price": 870,
+        "duration": "13h 10m",
+        "stops": 1,
+    },
+    "SFO-AMS-003": {
+        "origin": "SFO",
+        "destination": "AMS",
+        "departure_date": "2026-04-30",
+        "airline": "Delta",
+        "route": "San Francisco → Amsterdam",
+        "price": 940,
+        "duration": "13h 25m",
+        "stops": 1,
+    },
+    "SFO-AMS-004": {
+        "origin": "SFO",
+        "destination": "AMS",
+        "departure_date": "2026-05-02",
+        "airline": "Lufthansa",
+        "route": "San Francisco → Amsterdam",
+        "price": 890,
+        "duration": "14h 05m",
+        "stops": 1,
+    },
+    "SFO-AMS-005": {
+        "origin": "SFO",
+        "destination": "AMS",
+        "departure_date": "2026-05-03",
+        "airline": "British Airways",
+        "route": "San Francisco → Amsterdam",
+        "price": 915,
+        "duration": "14h 20m",
+        "stops": 1,
+    },
 }
 
 BOOKINGS = {}
@@ -37,12 +150,28 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "search_flights",
-            "description": "Search available flights between two cities",
+            "description": "Search available flights in the demo inventory between two cities or airport codes",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "origin": {"type": "string", "description": "Origin city code (e.g. NYC, LON, TYO)"},
-                    "destination": {"type": "string", "description": "Destination city code"},
+                    "origin": {
+                        "type": "string",
+                        "description": "Origin airport code or city name (e.g. NYC, SFO, New York, San Francisco)",
+                    },
+                    "destination": {
+                        "type": "string",
+                        "description": "Destination airport code or city name (e.g. TYO, AMS, Tokyo, Amsterdam)",
+                    },
+                    "departure_date": {
+                        "type": "string",
+                        "description": "Requested departure date. Prefer YYYY-MM-DD, but DD/Month is also accepted.",
+                    },
+                    "flexible_days": {
+                        "type": "integer",
+                        "description": "How many days before/after the requested date are acceptable.",
+                        "minimum": 0,
+                        "maximum": 7,
+                    },
                 },
                 "required": ["origin", "destination"],
             },
@@ -80,21 +209,128 @@ TOOLS = [
 ]
 
 
+def _normalize_airport(value: str) -> str:
+    cleaned = " ".join(str(value or "").strip().replace("-", " ").split()).upper()
+    return AIRPORT_ALIASES.get(cleaned, cleaned)
+
+
+def _parse_departure_date(raw: str | None) -> date | None:
+    if not raw:
+        return None
+
+    text = raw.strip()
+    if not text:
+        return None
+
+    today = datetime.utcnow().date()
+    formats = (
+        "%Y-%m-%d",
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d/%B/%Y",
+        "%d/%b/%Y",
+        "%B %d %Y",
+        "%b %d %Y",
+        "%d/%B",
+        "%d/%b",
+        "%B %d",
+        "%b %d",
+    )
+
+    for fmt in formats:
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+
+        if "%Y" in fmt:
+            return parsed.date()
+
+        candidate_year = today.year
+        candidate = date(candidate_year, parsed.month, parsed.day)
+        if candidate < today:
+            candidate = date(candidate_year + 1, parsed.month, parsed.day)
+        return candidate
+
+    return None
+
+
+def _available_route_dates(origin: str, dest: str) -> list[str]:
+    return sorted(
+        {
+            info["departure_date"]
+            for info in FLIGHTS.values()
+            if info["origin"] == origin and info["destination"] == dest
+        }
+    )
+
+
 def call_tool(name: str, args: dict) -> str:
     logger.info("Tool: %s(%s)", name, json.dumps(args))
 
     if name == "search_flights":
-        origin = args.get("origin", "").upper()
-        dest = args.get("destination", "").upper()
-        key = f"{origin}-{dest}"
-        results = [
+        origin = _normalize_airport(args.get("origin", ""))
+        dest = _normalize_airport(args.get("destination", ""))
+        requested_date = _parse_departure_date(args.get("departure_date"))
+        flexible_days = max(0, min(int(args.get("flexible_days", 0) or 0), 7))
+
+        all_results = [
             {"flight_id": fid, **info}
             for fid, info in FLIGHTS.items()
-            if fid.startswith(key)
+            if info["origin"] == origin and info["destination"] == dest
         ]
+
+        if requested_date:
+            window_start = requested_date - timedelta(days=flexible_days)
+            window_end = requested_date + timedelta(days=flexible_days)
+            results = [
+                flight
+                for flight in all_results
+                if window_start <= date.fromisoformat(flight["departure_date"]) <= window_end
+            ]
+        else:
+            window_start = None
+            window_end = None
+            results = all_results
+
+        results.sort(key=lambda flight: (flight["price"], flight["departure_date"], flight["stops"]))
+
+        search_criteria = {
+            "origin": origin,
+            "destination": dest,
+            "requested_departure_date": requested_date.isoformat() if requested_date else None,
+            "flexible_days": flexible_days,
+        }
+
         if not results:
-            return json.dumps({"flights": [], "message": f"No flights found for {origin} → {dest}"})
-        return json.dumps({"flights": results, "count": len(results)})
+            if all_results and requested_date and window_start and window_end:
+                available_dates = _available_route_dates(origin, dest)
+                return json.dumps(
+                    {
+                        "flights": [],
+                        "message": (
+                            f"No flights found in the demo inventory for {origin} → {dest} between "
+                            f"{window_start.isoformat()} and {window_end.isoformat()}. "
+                            f"Available demo departure dates for this route: {', '.join(available_dates)}."
+                        ),
+                        "search_criteria": search_criteria,
+                        "available_dates": available_dates,
+                    }
+                )
+
+            supported_routes = sorted({f"{info['origin']} → {info['destination']}" for info in FLIGHTS.values()})
+            return json.dumps(
+                {
+                    "flights": [],
+                    "message": (
+                        f"No flights found in the demo inventory for {origin} → {dest}. "
+                        f"Supported demo routes: {', '.join(supported_routes)}."
+                    ),
+                    "search_criteria": search_criteria,
+                }
+            )
+
+        return json.dumps({"flights": results, "count": len(results), "search_criteria": search_criteria})
 
     elif name == "book_flight":
         flight_id = args.get("flight_id", "")
@@ -123,7 +359,13 @@ SYSTEM_PROMPT = """You are a flight booking assistant. You can:
 - Search for available flights between cities
 - Book flights for passengers
 - Look up existing bookings
-Use the available tools to help users find and book flights."""
+Use the available tools to help users find and book flights.
+
+Important constraints:
+- This is a demo backed by a small in-memory flight inventory, not a live airline system.
+- When a user specifies a departure date, pass it to search_flights as departure_date.
+- When a user says their date is flexible, pass flexible_days to search_flights.
+- If the tool reports missing demo inventory, explain that limitation directly instead of implying a real-world no-availability result."""
 
 
 async def run_agent(messages: list[dict]) -> str:
